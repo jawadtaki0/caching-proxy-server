@@ -1,15 +1,14 @@
+import select
 import socket
 import threading
-import ssl
-import select
+
 from cache_manager import get_cached_response, save_response_to_cache
-from cert_manager import ensure_ca_certificate, ensure_host_certificate
 from config import HOST, PORT
-from request_parser import parse_request
-from forwarder import forward_https_request, forward_request
 from filter_manager import is_host_allowed
+from forwarder import forward_request
 from logger_setup import setup_logger
-from tracking_manager import add_tracked_log, get_tracked_domain, is_tracked_host, save_tracked_details
+from request_parser import parse_request
+from tracking_manager import save_tracked_details
 
 
 class ProxyServer:
@@ -23,16 +22,14 @@ class ProxyServer:
     def start(self):
         print(f"Starting proxy server on {self.host}:{self.port}")
 
-        #Socket creation
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.settimeout(1)
         self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen(5) #up to 5 clients
+        self.server_socket.listen(5)
         self.running = True
+
         print("Proxy server is listening...")
-        tracked_domain = get_tracked_domain() or "None"
-        print(f"Tracked domain: {tracked_domain}")
 
         try:
             while self.running:
@@ -51,7 +48,7 @@ class ProxyServer:
                 client_thread.start()
         except KeyboardInterrupt:
             print("\nStopping proxy server...")
-            self.logger.info("Proxy server stopped by user")
+            self.logger.info("SERVER stopped by user")
         finally:
             self.stop()
 
@@ -81,7 +78,6 @@ class ProxyServer:
 
                 if b"\r\n\r\n" in b"".join(chunks):
                     break
-
             except socket.timeout:
                 break
             except (ConnectionResetError, ConnectionAbortedError, OSError):
@@ -96,15 +92,62 @@ class ProxyServer:
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
             return False
 
-    def handle_connect_tunnel(self, client_socket, host, port):
+    def get_status_code(self, response_data):
+        try:
+            first_line = response_data.split(b"\r\n", 1)[0].decode(errors="replace")
+            parts = first_line.split()
+
+            if len(parts) >= 2 and parts[1].isdigit():
+                return parts[1]
+        except (IndexError, ValueError):
+            pass
+
+        return "unknown"
+
+    def print_request_details(self, client_address, request_data, parsed):
+        print(f"New connection from {client_address}")
+        print("---- Raw request ----")
+        print(request_data.decode(errors="replace"))
+        print("---- Parsed request ----")
+        print(f"method: {parsed['method']}")
+        print(f"host: {parsed['host']}")
+        print(f"port: {parsed['port']}")
+        print(f"headers: {parsed['headers']}")
+
+    def log_request(self, client_address, parsed, status_code, cache_result="NONE"):
+        message = (
+            f"REQUEST client={client_address[0]}:{client_address[1]} "
+            f"target={parsed['host']}:{parsed['port']} "
+            f"method={parsed['method']} url={parsed['path']} "
+            f"status={status_code} cache={cache_result}"
+        )
+        self.logger.info(message)
+        print("Logging confirmation")
+
+    def send_forbidden(self, client_socket):
+        self.safe_send(
+            client_socket,
+            b"HTTP/1.1 403 Forbidden\r\n"
+            b"Connection: close\r\n"
+            b"Content-Length: 9\r\n\r\n"
+            b"Forbidden"
+        )
+
+    def handle_connect_tunnel(self, client_socket, client_address, parsed, request_data):
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.settimeout(5)
 
         try:
-            server_socket.connect((host, port))
+            print("Forwarding request to server")
+            server_socket.connect((parsed["host"], parsed["port"]))
 
             if not self.safe_send(client_socket, b"HTTP/1.1 200 Connection Established\r\n\r\n"):
                 return
+
+            print("Response received")
+            print("status code: 200")
+            self.log_request(client_address, parsed, "200")
+            save_tracked_details("HTTPS CONNECT", client_address, parsed, request_data, b"HTTP/1.1 200 Connection Established\r\n\r\n")
 
             client_socket.settimeout(None)
             server_socket.settimeout(None)
@@ -124,220 +167,110 @@ class ProxyServer:
                     elif not self.safe_send(client_socket, data):
                         return
 
-        except OSError:
-            pass
-        finally:
-            server_socket.close()
-
-    def process_request(self, client_socket, client_address, parsed, request_data, is_https=False, should_record=False):
-        if not is_host_allowed(parsed["host"]):
-            if should_record:
-                message = (
-                    f"Blocked request from {client_address[0]}:{client_address[1]} "
-                    f"to {parsed['host']}:{parsed['port']} - "
-                    f"{parsed['method']} {parsed['path']}"
-                )
-                self.logger.warning(message)
-                add_tracked_log(message)
-
+        except OSError as error:
+            self.logger.error(
+                f"ERROR client={client_address[0]}:{client_address[1]} "
+                f"target={parsed['host']}:{parsed['port']} method=CONNECT "
+                f"url={parsed['path']} error={error}"
+            )
+            print("Response received")
+            print("status code: 502")
+            save_tracked_details("HTTPS CONNECT", client_address, parsed, request_data, b"HTTP/1.1 502 Bad Gateway\r\n\r\nBad Gateway")
             self.safe_send(
                 client_socket,
-                b"HTTP/1.1 403 Forbidden\r\n"
+                b"HTTP/1.1 502 Bad Gateway\r\n"
                 b"Connection: close\r\n"
-                b"Content-Length: 9\r\n\r\n"
-                b"Forbidden"
+                b"Content-Length: 11\r\n\r\n"
+                b"Bad Gateway"
             )
-            return
+        finally:
+            try:
+                server_socket.close()
+            except OSError:
+                pass
+
+    def handle_http_request(self, client_socket, client_address, parsed, request_data):
+        cache_result = "NONE"
 
         if parsed["method"] == "GET":
             cached_response = get_cached_response(parsed["host"], parsed["path"])
 
             if cached_response:
-                if should_record:
-                    message = (
-                        f"Cache hit for {parsed['host']}{parsed['path']} "
-                        f"requested by {client_address[0]}:{client_address[1]}"
-                    )
-                    self.logger.info(message)
-                    add_tracked_log(message)
-                    save_tracked_details("HTTPS" if is_https else "HTTP", client_address, parsed, request_data, cached_response)
-
+                cache_result = "HIT"
+                print("CACHE HIT")
+                status_code = self.get_status_code(cached_response)
+                print("Response received")
+                print(f"status code: {status_code}")
+                self.log_request(client_address, parsed, status_code, cache_result)
+                save_tracked_details("HTTP", client_address, parsed, request_data, cached_response)
                 self.safe_send(client_socket, cached_response)
                 return
 
-            if should_record:
-                message = (
-                    f"Cache miss for {parsed['host']}{parsed['path']} "
-                    f"requested by {client_address[0]}:{client_address[1]}"
-                )
-                self.logger.info(message)
-                add_tracked_log(message)
+            cache_result = "MISS"
+            print("CACHE MISS")
 
-        protocol_name = "HTTPS" if is_https else "HTTP"
+        print("Forwarding request to server")
+        response_data = forward_request(parsed["host"], parsed["port"], request_data)
+        status_code = self.get_status_code(response_data)
 
-        if should_record:
-            message = (
-                f"{protocol_name} request from {client_address[0]}:{client_address[1]} "
-                f"to {parsed['host']}:{parsed['port']} - "
-                f"{parsed['method']} {parsed['path']}"
-            )
-            self.logger.info(message)
-            add_tracked_log(message)
+        print("Response received")
+        print(f"status code: {status_code}")
 
-        if is_https:
-            response_data = forward_https_request(parsed["host"], parsed["port"], request_data)
-        else:
-            response_data = forward_request(parsed["host"], parsed["port"], request_data)
-
-        if should_record and parsed["method"] == "GET" and not response_data.startswith(b"HTTP/1.1 502") and not response_data.startswith(b"HTTP/1.1 504"):
+        if parsed["method"] == "GET" and status_code not in ("502", "504", "unknown"):
             save_response_to_cache(parsed["host"], parsed["path"], response_data)
 
-        if should_record:
-            save_tracked_details(protocol_name, client_address, parsed, request_data, response_data)
+        if status_code in ("502", "504"):
+            self.logger.error(
+                f"ERROR client={client_address[0]}:{client_address[1]} "
+                f"target={parsed['host']}:{parsed['port']} method={parsed['method']} "
+                f"url={parsed['path']} status={status_code}"
+            )
 
-            if response_data.startswith(b"HTTP/1.1 502") or response_data.startswith(b"HTTP/1.1 504"):
-                message = (
-                    f"Forwarding failed for {parsed['method']} {parsed['path']} "
-                    f"to {parsed['host']}:{parsed['port']}"
-                )
-                self.logger.error(message)
-                add_tracked_log(message)
-
+        self.log_request(client_address, parsed, status_code, cache_result)
+        save_tracked_details("HTTP", client_address, parsed, request_data, response_data)
         self.safe_send(client_socket, response_data)
 
-    def handle_https_intercept(self, client_socket, client_address, host, port):
+    def handle_client(self, client_socket, client_address):
         try:
-            ensure_ca_certificate()
-            cert_path, key_path = ensure_host_certificate(host)
-
-            if not self.safe_send(client_socket, b"HTTP/1.1 200 Connection Established\r\n\r\n"):
-                return
-
-            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ssl_context.load_cert_chain(certfile=cert_path, keyfile=key_path)
-            secure_client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
-
-            request_data = self.receive_request(secure_client_socket)
+            request_data = self.receive_request(client_socket)
 
             if not request_data:
-                secure_client_socket.close()
                 return
-
-            print("---- HTTPS Raw ----")
-            print(request_data.decode(errors="replace"))
 
             parsed = parse_request(request_data)
 
-            if parsed:
-                if not parsed["host"]:
-                    parsed["host"] = host
-
-                parsed["port"] = port
-
-            print("---- HTTPS Parsed ----")
-            print(parsed)
-
-            if parsed and parsed["host"]:
-                self.process_request(secure_client_socket, client_address, parsed, request_data, is_https=True, should_record=True)
-            else:
-                self.logger.error(f"Bad HTTPS request from {client_address[0]}:{client_address[1]}")
+            if not parsed or not parsed["host"]:
                 self.safe_send(
-                    secure_client_socket,
+                    client_socket,
                     b"HTTP/1.1 400 Bad Request\r\n"
                     b"Connection: close\r\n"
                     b"Content-Length: 11\r\n\r\n"
                     b"Bad Request"
                 )
-
-            secure_client_socket.close()
-
-        except ssl.SSLError as error:
-            if is_tracked_host(host):
-                message = f"TLS handshake failed for {host}:{port}: {error}"
-                self.logger.error(message)
-                add_tracked_log(message)
-        except Exception as error:
-            if is_tracked_host(host):
-                message = f"Certificate generation failed for {host}:{port}: {error}"
-                self.logger.error(message)
-                add_tracked_log(message)
-
-            self.safe_send(
-                client_socket,
-                b"HTTP/1.1 500 Internal Server Error\r\n"
-                b"Connection: close\r\n"
-                b"Content-Length: 29\r\n\r\n"
-                b"Certificate generation failed"
-            )
-        except OSError as error:
-            if is_tracked_host(host):
-                message = f"HTTPS interception failed for {host}:{port}: {error}"
-                self.logger.error(message)
-                add_tracked_log(message)
-
-    def handle_client(self, client_socket, client_address):
-        parsed = None
-        request_data = self.receive_request(client_socket)
-
-        if request_data:
-            parsed = parse_request(request_data)
-
-        if parsed and parsed["host"]:
-            should_record = is_tracked_host(parsed["host"])
-
-            if should_record:
-                print(f"Handling client {client_address}")
-                print("---- Raw ----")
-                print(request_data.decode(errors="replace"))
-                print("---- Parsed ----")
-                print(parsed)
-                self.logger.info(f"Client connected: {client_address[0]}:{client_address[1]}")
-                add_tracked_log(f"Client connected: {client_address[0]}:{client_address[1]}")
-
-            if parsed["method"] == "CONNECT":
-                if not is_host_allowed(parsed["host"]):
-                    if should_record:
-                        message = (
-                            f"Blocked request from {client_address[0]}:{client_address[1]} "
-                            f"to {parsed['host']}:{parsed['port']} - "
-                            f"{parsed['method']} {parsed['path']}"
-                        )
-                        self.logger.warning(message)
-                        add_tracked_log(message)
-
-                    self.safe_send(
-                        client_socket,
-                        b"HTTP/1.1 403 Forbidden\r\n"
-                        b"Connection: close\r\n"
-                        b"Content-Length: 9\r\n\r\n"
-                        b"Forbidden"
-                    )
-                    client_socket.close()
-                    return
-
-                if should_record:
-                    message = (
-                        f"HTTPS interception from {client_address[0]}:{client_address[1]} "
-                        f"to {parsed['host']}:{parsed['port']}"
-                    )
-                    self.logger.info(message)
-                    add_tracked_log(message)
-                    save_tracked_details("HTTPS", client_address, parsed, request_data, b"")
-                    self.handle_https_intercept(client_socket, client_address, parsed["host"], parsed["port"])
-                else:
-                    self.handle_connect_tunnel(client_socket, parsed["host"], parsed["port"])
-
-                client_socket.close()
                 return
 
-            self.process_request(client_socket, client_address, parsed, request_data, is_https=False, should_record=should_record)
-        else:
-            self.safe_send(
-                client_socket,
-                b"HTTP/1.1 400 Bad Request\r\n"
-                b"Connection: close\r\n"
-                b"Content-Length: 11\r\n\r\n"
-                b"Bad Request"
-            )
+            self.print_request_details(client_address, request_data, parsed)
 
-        client_socket.close()
+            if not is_host_allowed(parsed["host"]):
+                print("Request blocked by filter")
+                self.logger.warning(
+                    f"BLOCKED client={client_address[0]}:{client_address[1]} "
+                    f"target={parsed['host']}:{parsed['port']} method={parsed['method']} "
+                    f"url={parsed['path']} status=403"
+                )
+                self.send_forbidden(client_socket)
+                print("Response received")
+                print("status code: 403")
+                print("Logging confirmation")
+                save_tracked_details("HTTP" if parsed["method"] != "CONNECT" else "HTTPS CONNECT", client_address, parsed, request_data, b"HTTP/1.1 403 Forbidden\r\n\r\nForbidden")
+                return
+
+            if parsed["method"] == "CONNECT":
+                self.handle_connect_tunnel(client_socket, client_address, parsed, request_data)
+            else:
+                self.handle_http_request(client_socket, client_address, parsed, request_data)
+        finally:
+            try:
+                client_socket.close()
+            except OSError:
+                pass

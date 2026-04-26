@@ -1,5 +1,4 @@
 import html
-import json
 import os
 import socket
 from datetime import datetime
@@ -8,16 +7,11 @@ from urllib.parse import parse_qs
 
 from cache_manager import read_cache_index, request_cache_clear
 from config import ADMIN_HOST, ADMIN_PORT, HOST, PORT
-from tracking_manager import (
-    clear_tracked_domain,
-    get_tracked_details,
-    get_tracked_domain,
-    get_tracked_logs,
-    set_tracked_domain,
-)
+from tracking_manager import get_tracked_details
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "proxy.log")
 BLACKLIST_FILE = os.path.join(PROJECT_ROOT, "data", "blacklist.txt")
 WHITELIST_FILE = os.path.join(PROJECT_ROOT, "data", "whitelist.txt")
 
@@ -27,43 +21,54 @@ def read_lines(file_path):
         return []
 
     with open(file_path, "r", encoding="utf-8") as file:
-        return [line.strip() for line in file if line.strip()]
+        return [line.rstrip() for line in file if line.strip()]
 
 
 def write_lines(file_path, lines):
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
     with open(file_path, "w", encoding="utf-8") as file:
         for line in lines:
             file.write(f"{line}\n")
 
 
-def add_entry(file_path, entry):
+def read_filter_entries(file_path):
+    return [line.strip().lower() for line in read_lines(file_path)]
+
+
+def add_filter_entry(file_path, entry):
     entry = entry.strip().lower()
 
     if not entry:
         return
 
-    entries = read_lines(file_path)
+    entries = read_filter_entries(file_path)
 
     if entry not in entries:
         entries.append(entry)
         write_lines(file_path, entries)
 
 
-def remove_entry(file_path, entry):
+def remove_filter_entry(file_path, entry):
     entry = entry.strip().lower()
-    entries = read_lines(file_path)
-    entries = [current_entry for current_entry in entries if current_entry != entry]
+    entries = [current for current in read_filter_entries(file_path) if current != entry]
     write_lines(file_path, entries)
 
 
-def count_log_stats():
-    lines = get_tracked_logs(limit=1000)
+def get_log_lines(limit=100):
+    lines = read_lines(LOG_FILE)
+    return lines[-limit:]
+
+
+def get_stats():
+    lines = read_lines(LOG_FILE)
+
     return {
-        "requests": sum(" request from " in line for line in lines),
-        "blocked": sum("Blocked request" in line for line in lines),
-        "errors": sum(" - ERROR - " in line for line in lines),
-        "cache_hits": sum("Cache hit" in line for line in lines),
-        "cache_misses": sum("Cache miss" in line for line in lines),
+        "total_requests": sum("REQUEST " in line for line in lines),
+        "blocked": sum("BLOCKED " in line for line in lines),
+        "errors": sum(" - ERROR - " in line or "ERROR " in line for line in lines),
+        "cache_hits": sum("cache=HIT" in line for line in lines),
+        "cache_misses": sum("cache=MISS" in line for line in lines),
     }
 
 
@@ -78,8 +83,6 @@ class AdminHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/":
             self.send_dashboard()
-        elif self.path == "/details":
-            self.send_details_text()
         elif self.path == "/logs":
             self.send_logs()
         elif self.path == "/cache":
@@ -96,26 +99,20 @@ class AdminHandler(BaseHTTPRequestHandler):
         action = form_data.get("action", [""])[0]
         entry = form_data.get("entry", [""])[0]
 
-        if action == "set_tracked_domain":
-            set_tracked_domain(entry)
-            self.redirect("/")
-        elif action == "clear_tracked_domain":
-            clear_tracked_domain()
-            self.redirect("/")
-        elif action == "clear_cache":
+        if action == "clear_cache":
             request_cache_clear()
             self.redirect("/cache")
         elif action == "add_blacklist":
-            add_entry(BLACKLIST_FILE, entry)
+            add_filter_entry(BLACKLIST_FILE, entry)
             self.redirect("/filter")
         elif action == "remove_blacklist":
-            remove_entry(BLACKLIST_FILE, entry)
+            remove_filter_entry(BLACKLIST_FILE, entry)
             self.redirect("/filter")
         elif action == "add_whitelist":
-            add_entry(WHITELIST_FILE, entry)
+            add_filter_entry(WHITELIST_FILE, entry)
             self.redirect("/filter")
         elif action == "remove_whitelist":
-            remove_entry(WHITELIST_FILE, entry)
+            remove_filter_entry(WHITELIST_FILE, entry)
             self.redirect("/filter")
         else:
             self.redirect("/")
@@ -142,73 +139,43 @@ class AdminHandler(BaseHTTPRequestHandler):
             pass
 
     def send_dashboard(self):
-        blacklist = read_lines(BLACKLIST_FILE)
-        whitelist = read_lines(WHITELIST_FILE)
+        blacklist = read_filter_entries(BLACKLIST_FILE)
+        whitelist = read_filter_entries(WHITELIST_FILE)
         cache_index = read_cache_index()
-        stats = count_log_stats()
-        tracked_domain = get_tracked_domain() or "None"
-        details = get_tracked_details()
+        stats = get_stats()
 
         content = f"""
         <section>
             <h2>Dashboard</h2>
-            {self.tracked_domain_form()}
+            <p class="muted">Refresh this page manually after sending demo requests.</p>
             <div class="stats">
                 {self.stat_card("Proxy", f"{HOST}:{PORT}")}
-                {self.stat_card("Tracked domain", tracked_domain)}
+                {self.stat_card("Total requests", stats["total_requests"])}
                 {self.stat_card("Cache entries", len(cache_index))}
-                {self.stat_card("Blacklist entries", len(blacklist))}
-                {self.stat_card("Whitelist entries", len(whitelist))}
-                {self.stat_card("Requests", stats["requests"])}
+                {self.stat_card("Cache hit/miss", f'{stats["cache_hits"]}/{stats["cache_misses"]}')}
                 {self.stat_card("Blocked", stats["blocked"])}
                 {self.stat_card("Errors", stats["errors"])}
-                {self.stat_card("Cache hit/miss", f'{stats["cache_hits"]}/{stats["cache_misses"]}')}
+                {self.stat_card("Blacklist entries", len(blacklist))}
+                {self.stat_card("Whitelist entries", len(whitelist))}
             </div>
         </section>
-        {self.details_section(details)}
+        <section>
+            <h2>Recent Logs</h2>
+            <pre>{self.format_logs(get_log_lines(25))}</pre>
+        </section>
+        {self.details_section(get_tracked_details())}
         """
         self.send_html(self.layout("Dashboard", content))
 
     def send_logs(self):
-        logs = get_tracked_logs()
-        logs_html = "\n".join(html.escape(line) for line in logs) or "No tracked log entries yet"
         content = f"""
         <section>
-            <h2>Tracked Logs</h2>
-            <pre>{logs_html}</pre>
+            <h2>Logs</h2>
+            <p class="muted">Showing the last 100 lines from logs/proxy.log.</p>
+            <pre>{self.format_logs(get_log_lines(100))}</pre>
         </section>
         """
         self.send_html(self.layout("Logs", content))
-
-    def send_details_text(self):
-        details = get_tracked_details()
-        tracked_domain = get_tracked_domain() or "None"
-
-        if details:
-            text = (
-                f"Tracked domain: {tracked_domain}\n"
-                f"Captured: {details.get('timestamp', '')}\n"
-                f"Protocol: {details.get('protocol', '')}\n"
-                f"Method: {details.get('method', '')}\n"
-                f"Host: {details.get('host', '')}\n"
-                f"Port: {details.get('port', '')}\n"
-                f"Path: {details.get('path', '')}\n"
-            )
-        else:
-            text = f"Tracked domain: {tracked_domain}\nNo tracked request captured yet.\n"
-
-        encoded_text = text.encode("utf-8")
-
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(encoded_text)))
-        self.end_headers()
-
-        try:
-            self.wfile.write(encoded_text)
-        except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, socket.error):
-            pass
 
     def send_cache(self):
         cache_index = read_cache_index()
@@ -220,12 +187,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                 rows += f"""
                 <tr>
                     <td>{html.escape(cache_key)}</td>
+                    <td>{html.escape(str(entry.get("host", "")))}</td>
+                    <td>{html.escape(str(entry.get("path", "")))}</td>
                     <td>{html.escape(str(entry.get("size", 0)))}</td>
                     <td>{html.escape(format_timestamp(entry.get("timestamp")))}</td>
                 </tr>
                 """
         else:
-            rows = '<tr><td colspan="3" class="muted">No cache entries</td></tr>'
+            rows = '<tr><td colspan="5" class="muted">No cache entries</td></tr>'
 
         content = f"""
         <section>
@@ -237,6 +206,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                 <thead>
                     <tr>
                         <th>Cache Key</th>
+                        <th>Host</th>
+                        <th>Path</th>
                         <th>Size</th>
                         <th>Cached At</th>
                     </tr>
@@ -248,15 +219,15 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.send_html(self.layout("Cache", content))
 
     def send_filter(self):
-        blacklist = read_lines(BLACKLIST_FILE)
-        whitelist = read_lines(WHITELIST_FILE)
+        blacklist = read_filter_entries(BLACKLIST_FILE)
+        whitelist = read_filter_entries(WHITELIST_FILE)
 
         content = f"""
         <section class="split">
             <div>
                 <h2>Blacklist</h2>
                 {self.add_form("add_blacklist", "Add blocked host", "example.com")}
-                {self.entry_list(blacklist, "remove_blacklist", "No blocked hosts")}
+                {self.entry_list(blacklist, "remove_blacklist", "No blacklist entries")}
             </div>
             <div>
                 <h2>Whitelist</h2>
@@ -275,37 +246,23 @@ class AdminHandler(BaseHTTPRequestHandler):
         </div>
         """
 
-    def tracked_domain_form(self):
-        tracked_domain = get_tracked_domain() or "None"
-
-        return f"""
-        <div class="tracked-domain">
-            <div class="label">Current tracked domain: <strong>{html.escape(tracked_domain)}</strong></div>
-            <form method="post" autocomplete="off">
-                <input name="entry" placeholder="iana.org" autocomplete="new-password" spellcheck="false" required>
-                <button name="action" value="set_tracked_domain">Set Domain</button>
-                <button class="danger" name="action" value="clear_tracked_domain" formnovalidate>Clear Domain</button>
-            </form>
-        </div>
-        """
-
     def details_section(self, details):
         if not details:
             return """
             <section>
-                <h2>Tracked Request Details</h2>
-                <div class="muted">No tracked request captured yet.</div>
+                <h2>Latest Request Details</h2>
+                <div class="muted">No request details captured yet.</div>
             </section>
             """
 
         headers = "\n".join(
             f"{key}: {value}" for key, value in details.get("headers", {}).items()
         )
-        parsed_request = json.dumps(details.get("parsed_request", {}), indent=2)
+        parsed_request = html.escape(str(details.get("parsed_request", {})))
 
         return f"""
         <section>
-            <h2>Tracked Request Details</h2>
+            <h2>Latest Request Details</h2>
             <div class="stats">
                 {self.stat_card("Protocol", details.get("protocol", ""))}
                 {self.stat_card("Method", details.get("method", ""))}
@@ -317,13 +274,21 @@ class AdminHandler(BaseHTTPRequestHandler):
             <h3>Headers</h3>
             <pre>{html.escape(headers or "No headers")}</pre>
             <h3>Parsed Request</h3>
-            <pre>{html.escape(parsed_request)}</pre>
+            <pre>{parsed_request}</pre>
+            <h3>Raw Request</h3>
+            <pre>{html.escape(details.get("raw_request", "") or "No raw request")}</pre>
             <h3>Response Headers</h3>
             <pre>{html.escape(details.get("response_headers", "") or "No response headers")}</pre>
-            <h3>HTML / Body Preview</h3>
+            <h3>Body Preview</h3>
             <pre>{html.escape(details.get("body_preview", "") or "No body preview")}</pre>
         </section>
         """
+
+    def format_logs(self, lines):
+        if not lines:
+            return "No log entries yet"
+
+        return "\n".join(html.escape(line) for line in lines)
 
     def add_form(self, action, button_text, placeholder):
         return f"""
@@ -410,6 +375,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         }}
 
         main {{
+            display: grid;
+            gap: 18px;
             padding: 24px 28px;
         }}
 
@@ -460,14 +427,6 @@ class AdminHandler(BaseHTTPRequestHandler):
             display: flex;
             gap: 8px;
             margin: 0 0 12px;
-        }}
-
-        .tracked-domain {{
-            margin-bottom: 18px;
-            padding: 14px;
-            border: 1px solid var(--line);
-            border-radius: 6px;
-            background: #f8fafc;
         }}
 
         h3 {{
@@ -536,8 +495,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         pre {{
             margin: 0;
             padding: 14px;
-            min-height: 430px;
-            max-height: 680px;
+            min-height: 320px;
+            max-height: 620px;
             overflow: auto;
             border-radius: 6px;
             background: var(--code);
@@ -569,11 +528,6 @@ class AdminHandler(BaseHTTPRequestHandler):
         </nav>
     </header>
     <main>{content}</main>
-    <script>
-        setTimeout(function () {{
-            window.location.reload();
-        }}, 2000);
-    </script>
 </body>
 </html>"""
 

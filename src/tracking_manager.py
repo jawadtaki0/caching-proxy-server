@@ -31,13 +31,16 @@ def clear_tracked_domain():
 
 
 def is_tracked_host(host):
-    tracked_domain = get_tracked_domain()
+    tracked = get_tracked_domain()
 
-    if not tracked_domain or not host:
+    if not tracked:
         return False
 
-    host = host.lower().split(":", 1)[0]
-    return host == tracked_domain or host.endswith(f".{tracked_domain}")
+    # normalize both
+    host = host.lower()
+    tracked = tracked.lower()
+
+    return host == tracked or host.endswith("." + tracked)
 
 
 def add_tracked_log(message):

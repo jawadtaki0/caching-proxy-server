@@ -1,1 +1,29 @@
-{}
+{
+  "timestamp": "2026-04-26 22:32:25",
+  "protocol": "HTTPS CONNECT",
+  "client": "127.0.0.1:65405",
+  "method": "CONNECT",
+  "path": "android.clients.google.com:443",
+  "host": "android.clients.google.com",
+  "port": 443,
+  "headers": {
+    "host": "android.clients.google.com:443",
+    "proxy-connection": "keep-alive",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+  },
+  "parsed_request": {
+    "method": "CONNECT",
+    "path": "android.clients.google.com:443",
+    "http_version": "HTTP/1.1",
+    "host": "android.clients.google.com",
+    "port": 443,
+    "headers": {
+      "host": "android.clients.google.com:443",
+      "proxy-connection": "keep-alive",
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    }
+  },
+  "raw_request": "CONNECT android.clients.google.com:443 HTTP/1.1\r\nHost: android.clients.google.com:443\r\nProxy-Connection: keep-alive\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36\r\n\r\n",
+  "response_headers": "HTTP/1.1 200 Connection Established",
+  "body_preview": ""
+}
