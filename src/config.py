@@ -1,4 +1,7 @@
 HOST = "127.0.0.1"
 PORT = 8888
 
+ADMIN_HOST = "127.0.0.1"
+ADMIN_PORT = 5000
+
 CACHE_TIMEOUT = 60  # seconds

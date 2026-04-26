@@ -4,3 +4,9 @@ __pycache__/
 .vscode/
 logs/*.log
 data/cache/*
+certs/*
+admin_test_*.txt
+mitm_*.txt
+vendor/
+.venv/
+venv/

@@ -28,7 +28,15 @@ def parse_request(request_data):
     host = None
     port = 80
 
-    if "host" in headers:
+    if method == "CONNECT":
+        if ":" in path:
+            host_parts = path.split(":", 1)
+            host = host_parts[0]
+            port = int(host_parts[1])
+        else:
+            host = path
+            port = 443
+    elif "host" in headers:
         host_value = headers["host"]
 
         if ":" in host_value:

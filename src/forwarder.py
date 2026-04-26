@@ -1,4 +1,5 @@
 import socket
+import ssl
 
 
 def forward_request(host, port, request_data):
@@ -83,3 +84,62 @@ def forward_request(host, port, request_data):
 
     finally:
         server_socket.close()
+
+
+def forward_https_request(host, port, request_data):
+    raw_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    raw_server_socket.settimeout(5)
+    ssl_context = ssl.create_default_context()
+
+    try:
+        raw_server_socket.connect((host, port))
+
+        with ssl_context.wrap_socket(raw_server_socket, server_hostname=host) as server_socket:
+            server_socket.sendall(request_data)
+
+            response_chunks = []
+
+            while True:
+                try:
+                    chunk = server_socket.recv(4096)
+
+                    if not chunk:
+                        break
+
+                    response_chunks.append(chunk)
+
+                except socket.timeout:
+                    break
+
+            response_data = b"".join(response_chunks)
+            return response_data
+
+    except socket.gaierror:
+        return (
+            b"HTTP/1.1 502 Bad Gateway\r\n"
+            b"Connection: close\r\n"
+            b"Content-Length: 17\r\n\r\n"
+            b"DNS lookup failed"
+        )
+
+    except socket.timeout:
+        return (
+            b"HTTP/1.1 504 Gateway Timeout\r\n"
+            b"Connection: close\r\n"
+            b"Content-Length: 15\r\n\r\n"
+            b"Gateway Timeout"
+        )
+
+    except OSError:
+        return (
+            b"HTTP/1.1 502 Bad Gateway\r\n"
+            b"Connection: close\r\n"
+            b"Content-Length: 11\r\n\r\n"
+            b"Bad Gateway"
+        )
+
+    finally:
+        try:
+            raw_server_socket.close()
+        except OSError:
+            pass
