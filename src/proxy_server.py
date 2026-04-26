@@ -18,6 +18,7 @@ class ProxyServer:
         self.server_socket = None
         self.logger = setup_logger()
         self.running = False
+        self.print_lock = threading.Lock()
 
     def start(self):
         print(f"Starting proxy server on {self.host}:{self.port}")
@@ -104,15 +105,26 @@ class ProxyServer:
 
         return "unknown"
 
-    def print_request_details(self, client_address, request_data, parsed):
-        print(f"New connection from {client_address}")
-        print("---- Raw request ----")
-        print(request_data.decode(errors="replace"))
-        print("---- Parsed request ----")
-        print(f"method: {parsed['method']}")
-        print(f"host: {parsed['host']}")
-        print(f"port: {parsed['port']}")
-        print(f"headers: {parsed['headers']}")
+    def print_request_summary(self, client_address, parsed, request_data, status_code, cache_result):
+        raw_request = request_data.decode(errors="replace").strip()
+        lines = [
+            "========== REQUEST ==========",
+            f"Client: {client_address[0]}:{client_address[1]}",
+            f"Method: {parsed['method']}",
+            f"Host: {parsed['host']}",
+            f"Port: {parsed['port']}",
+            f"Path: {parsed['path']}",
+            f"Status: {status_code}",
+            f"Cache: {cache_result}",
+            f"Headers: {parsed['headers']}",
+            "Raw request:",
+            raw_request,
+            "=============================",
+        ]
+
+        with self.print_lock:
+            for line in lines:
+                print(line)
 
     def log_request(self, client_address, parsed, status_code, cache_result="NONE"):
         message = (
@@ -122,7 +134,6 @@ class ProxyServer:
             f"status={status_code} cache={cache_result}"
         )
         self.logger.info(message)
-        print("Logging confirmation")
 
     def send_forbidden(self, client_socket):
         self.safe_send(
@@ -138,16 +149,14 @@ class ProxyServer:
         server_socket.settimeout(5)
 
         try:
-            print("Forwarding request to server")
             server_socket.connect((parsed["host"], parsed["port"]))
 
             if not self.safe_send(client_socket, b"HTTP/1.1 200 Connection Established\r\n\r\n"):
                 return
 
-            print("Response received")
-            print("status code: 200")
             self.log_request(client_address, parsed, "200")
             save_tracked_details("HTTPS CONNECT", client_address, parsed, request_data, b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            self.print_request_summary(client_address, parsed, request_data, "200", "NONE")
 
             client_socket.settimeout(None)
             server_socket.settimeout(None)
@@ -173,9 +182,8 @@ class ProxyServer:
                 f"target={parsed['host']}:{parsed['port']} method=CONNECT "
                 f"url={parsed['path']} error={error}"
             )
-            print("Response received")
-            print("status code: 502")
             save_tracked_details("HTTPS CONNECT", client_address, parsed, request_data, b"HTTP/1.1 502 Bad Gateway\r\n\r\nBad Gateway")
+            self.print_request_summary(client_address, parsed, request_data, "502", "NONE")
             self.safe_send(
                 client_socket,
                 b"HTTP/1.1 502 Bad Gateway\r\n"
@@ -197,24 +205,17 @@ class ProxyServer:
 
             if cached_response:
                 cache_result = "HIT"
-                print("CACHE HIT")
                 status_code = self.get_status_code(cached_response)
-                print("Response received")
-                print(f"status code: {status_code}")
                 self.log_request(client_address, parsed, status_code, cache_result)
                 save_tracked_details("HTTP", client_address, parsed, request_data, cached_response)
+                self.print_request_summary(client_address, parsed, request_data, status_code, cache_result)
                 self.safe_send(client_socket, cached_response)
                 return
 
             cache_result = "MISS"
-            print("CACHE MISS")
 
-        print("Forwarding request to server")
         response_data = forward_request(parsed["host"], parsed["port"], request_data)
         status_code = self.get_status_code(response_data)
-
-        print("Response received")
-        print(f"status code: {status_code}")
 
         if parsed["method"] == "GET" and status_code not in ("502", "504", "unknown"):
             save_response_to_cache(parsed["host"], parsed["path"], response_data)
@@ -228,6 +229,7 @@ class ProxyServer:
 
         self.log_request(client_address, parsed, status_code, cache_result)
         save_tracked_details("HTTP", client_address, parsed, request_data, response_data)
+        self.print_request_summary(client_address, parsed, request_data, status_code, cache_result)
         self.safe_send(client_socket, response_data)
 
     def handle_client(self, client_socket, client_address):
@@ -249,20 +251,15 @@ class ProxyServer:
                 )
                 return
 
-            self.print_request_details(client_address, request_data, parsed)
-
             if not is_host_allowed(parsed["host"]):
-                print("Request blocked by filter")
                 self.logger.warning(
                     f"BLOCKED client={client_address[0]}:{client_address[1]} "
                     f"target={parsed['host']}:{parsed['port']} method={parsed['method']} "
                     f"url={parsed['path']} status=403"
                 )
                 self.send_forbidden(client_socket)
-                print("Response received")
-                print("status code: 403")
-                print("Logging confirmation")
                 save_tracked_details("HTTP" if parsed["method"] != "CONNECT" else "HTTPS CONNECT", client_address, parsed, request_data, b"HTTP/1.1 403 Forbidden\r\n\r\nForbidden")
+                self.print_request_summary(client_address, parsed, request_data, "403", "NONE")
                 return
 
             if parsed["method"] == "CONNECT":

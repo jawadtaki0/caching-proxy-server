@@ -3,7 +3,7 @@ import os
 import socket
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from cache_manager import read_cache_index, request_cache_clear
 from config import ADMIN_HOST, ADMIN_PORT, HOST, PORT
@@ -60,6 +60,22 @@ def get_log_lines(limit=100):
     return lines[-limit:]
 
 
+def clear_logs():
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+    with open(LOG_FILE, "w", encoding="utf-8") as file:
+        file.write("")
+
+
+def filter_log_lines(lines, query):
+    query = query.strip().lower()
+
+    if not query:
+        return lines
+
+    return [line for line in lines if query in line.lower()]
+
+
 def get_stats():
     lines = read_lines(LOG_FILE)
 
@@ -81,13 +97,16 @@ def format_timestamp(timestamp):
 
 class AdminHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/":
+        parsed_url = urlparse(self.path)
+
+        if parsed_url.path == "/":
             self.send_dashboard()
-        elif self.path == "/logs":
-            self.send_logs()
-        elif self.path == "/cache":
+        elif parsed_url.path == "/logs":
+            query = parse_qs(parsed_url.query).get("q", [""])[0]
+            self.send_logs(query)
+        elif parsed_url.path == "/cache":
             self.send_cache()
-        elif self.path == "/filter":
+        elif parsed_url.path == "/filter":
             self.send_filter()
         else:
             self.send_error(404, "Page not found")
@@ -99,7 +118,10 @@ class AdminHandler(BaseHTTPRequestHandler):
         action = form_data.get("action", [""])[0]
         entry = form_data.get("entry", [""])[0]
 
-        if action == "clear_cache":
+        if action == "clear_logs":
+            clear_logs()
+            self.redirect("/logs")
+        elif action == "clear_cache":
             request_cache_clear()
             self.redirect("/cache")
         elif action == "add_blacklist":
@@ -167,12 +189,21 @@ class AdminHandler(BaseHTTPRequestHandler):
         """
         self.send_html(self.layout("Dashboard", content))
 
-    def send_logs(self):
+    def send_logs(self, query=""):
+        lines = filter_log_lines(get_log_lines(300), query)
         content = f"""
         <section>
             <h2>Logs</h2>
-            <p class="muted">Showing the last 100 lines from logs/proxy.log.</p>
-            <pre>{self.format_logs(get_log_lines(100))}</pre>
+            <p class="muted">Search by domain, port, method, status, or cache value.</p>
+            <form method="get" action="/logs" autocomplete="off">
+                <input name="q" value="{html.escape(query)}" placeholder="example.com, :443, GET, HIT, 200" autocomplete="new-password" spellcheck="false">
+                <button>Search</button>
+                <a class="button-link" href="/logs">Clear Search</a>
+            </form>
+            <form method="post">
+                <button class="danger" name="action" value="clear_logs">Clear Logs</button>
+            </form>
+            <pre>{self.format_logs(lines[-100:])}</pre>
         </section>
         """
         self.send_html(self.layout("Logs", content))
@@ -372,6 +403,17 @@ class AdminHandler(BaseHTTPRequestHandler):
             border: 1px solid #506070;
             border-radius: 6px;
             padding: 7px 10px;
+        }}
+
+        .button-link {{
+            display: inline-flex;
+            align-items: center;
+            padding: 9px 12px;
+            border-radius: 6px;
+            background: #475467;
+            color: white;
+            text-decoration: none;
+            font-weight: 600;
         }}
 
         main {{
