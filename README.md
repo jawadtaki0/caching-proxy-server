@@ -35,7 +35,6 @@ src/
 data/
   blacklist.txt
   whitelist.txt
-  mitm_domains.txt
 
 logs/
   proxy.log
@@ -54,6 +53,16 @@ certs/<domain>_key.pem
 ```
 
 Each machine gets its own local CA and per-domain certificates. These files should not be pushed to GitHub because they include private keys.
+
+Some data files are generated at runtime and are also ignored by Git:
+
+```text
+data/tracked_details.json
+data/request_history.json
+data/mitm_domains.txt
+```
+
+`tracked_details.json` and `request_history.json` are created when requests are captured for the admin dashboard. `mitm_domains.txt` is created when MITM domains are read or updated. The committed data files are only the editable filter lists: `blacklist.txt` and `whitelist.txt`.
 
 ## Requirements
 

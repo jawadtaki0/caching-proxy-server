@@ -12,3 +12,7 @@ vendor_new/
 .venv/
 venv/
 data/request_history.json
+data/tracked_details.json
+data/tracked_domain.txt
+data/tracked_logs.txt
+data/mitm_domains.txt

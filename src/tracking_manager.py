@@ -5,63 +5,9 @@ from datetime import datetime
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
-TRACKED_DOMAIN_FILE = os.path.join(DATA_DIR, "tracked_domain.txt")
 TRACKED_DETAILS_FILE = os.path.join(DATA_DIR, "tracked_details.json")
 REQUEST_HISTORY_FILE = os.path.join(DATA_DIR, "request_history.json")
-TRACKED_LOG_FILE = os.path.join(DATA_DIR, "tracked_logs.txt")
 MAX_REQUEST_HISTORY = 50
-
-
-def get_tracked_domain():
-    if not os.path.exists(TRACKED_DOMAIN_FILE):
-        return ""
-
-    with open(TRACKED_DOMAIN_FILE, "r", encoding="utf-8") as file:
-        return file.read().strip().lower()
-
-
-def set_tracked_domain(domain):
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    with open(TRACKED_DOMAIN_FILE, "w", encoding="utf-8") as file:
-        file.write(domain.strip().lower())
-
-    clear_tracked_details()
-
-
-def clear_tracked_domain():
-    set_tracked_domain("")
-
-
-def is_tracked_host(host):
-    tracked = get_tracked_domain()
-
-    if not tracked:
-        return False
-
-    # normalize both
-    host = host.lower()
-    tracked = tracked.lower()
-
-    return host == tracked or host.endswith("." + tracked)
-
-
-def add_tracked_log(message):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    with open(TRACKED_LOG_FILE, "a", encoding="utf-8") as file:
-        file.write(f"{timestamp} - {message}\n")
-
-
-def get_tracked_logs(limit=100):
-    if not os.path.exists(TRACKED_LOG_FILE):
-        return []
-
-    with open(TRACKED_LOG_FILE, "r", encoding="utf-8") as file:
-        lines = file.readlines()
-
-    return [line.rstrip() for line in lines[-limit:]]
 
 
 def clear_tracked_details():
@@ -72,9 +18,6 @@ def clear_tracked_details():
 
     with open(REQUEST_HISTORY_FILE, "w", encoding="utf-8") as file:
         json.dump([], file)
-
-    with open(TRACKED_LOG_FILE, "w", encoding="utf-8") as file:
-        file.write("")
 
 
 def split_response(response_data):
