@@ -5,10 +5,14 @@ from datetime import datetime, timedelta, timezone
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-VENDOR_DIR = os.path.join(PROJECT_ROOT, "vendor")
+VENDOR_DIRS = [
+    os.path.join(PROJECT_ROOT, "vendor_new"),
+    os.path.join(PROJECT_ROOT, "vendor"),
+]
 
-if os.path.isdir(VENDOR_DIR) and VENDOR_DIR not in sys.path:
-    sys.path.insert(0, VENDOR_DIR)
+for vendor_dir in reversed(VENDOR_DIRS):
+    if os.path.isdir(vendor_dir) and vendor_dir not in sys.path:
+        sys.path.insert(0, vendor_dir)
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization

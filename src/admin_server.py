@@ -7,7 +7,8 @@ from urllib.parse import parse_qs, urlparse
 
 from cache_manager import read_cache_index, request_cache_clear
 from config import ADMIN_HOST, ADMIN_PORT, HOST, PORT
-from tracking_manager import get_tracked_details
+from mitm_manager import add_mitm_domain, read_mitm_domains, remove_mitm_domain
+from tracking_manager import get_request_history, get_tracked_details
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -95,12 +96,32 @@ def format_timestamp(timestamp):
         return "unknown"
 
 
+def clean_body_preview_for_display(details):
+    preview = details.get("body_preview", "") or ""
+    response_headers = details.get("response_headers", "").lower()
+
+    if not preview:
+        return "No body preview"
+
+    if "content-type: image/" in response_headers:
+        return "Binary image response body; preview unavailable."
+
+    if "\ufffd" in preview and "content-encoding:" in response_headers:
+        return "Compressed response body was captured before preview decoding was active. Restart the proxy and reload the page."
+
+    if "\ufffd" in preview:
+        return "Binary or unreadable response body; preview unavailable."
+
+    return preview
+
+
 class AdminHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed_url = urlparse(self.path)
 
         if parsed_url.path == "/":
-            self.send_dashboard()
+            request_index = parse_qs(parsed_url.query).get("request", ["0"])[0]
+            self.send_dashboard(request_index)
         elif parsed_url.path == "/logs":
             query = parse_qs(parsed_url.query).get("q", [""])[0]
             self.send_logs(query)
@@ -108,6 +129,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             self.send_cache()
         elif parsed_url.path == "/filter":
             self.send_filter()
+        elif parsed_url.path == "/mitm":
+            self.send_mitm()
         else:
             self.send_error(404, "Page not found")
 
@@ -136,6 +159,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         elif action == "remove_whitelist":
             remove_filter_entry(WHITELIST_FILE, entry)
             self.redirect("/filter")
+        elif action == "add_mitm_domain":
+            add_mitm_domain(entry)
+            self.redirect("/mitm")
+        elif action == "remove_mitm_domain":
+            remove_mitm_domain(entry)
+            self.redirect("/mitm")
         else:
             self.redirect("/")
 
@@ -160,11 +189,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, socket.error):
             pass
 
-    def send_dashboard(self):
+    def send_dashboard(self, request_index="0"):
         blacklist = read_filter_entries(BLACKLIST_FILE)
         whitelist = read_filter_entries(WHITELIST_FILE)
         cache_index = read_cache_index()
         stats = get_stats()
+        request_details, current_index, total_details = self.get_request_details_for_dashboard(request_index)
 
         content = f"""
         <section>
@@ -185,9 +215,27 @@ class AdminHandler(BaseHTTPRequestHandler):
             <h2>Recent Logs</h2>
             <pre>{self.format_logs(get_log_lines(25))}</pre>
         </section>
-        {self.details_section(get_tracked_details())}
+        {self.request_details_section(request_details, current_index, total_details)}
         """
         self.send_html(self.layout("Dashboard", content))
+
+    def get_request_details_for_dashboard(self, request_index):
+        try:
+            index = int(request_index)
+        except ValueError:
+            index = 0
+
+        history = list(reversed(get_request_history(10)))
+
+        if not history:
+            latest = get_tracked_details()
+            history = [latest] if latest else []
+
+        if not history:
+            return None, 0, 0
+
+        index = max(0, min(index, len(history) - 1))
+        return history[index], index, len(history)
 
     def send_logs(self, query=""):
         lines = filter_log_lines(get_log_lines(300), query)
@@ -269,6 +317,19 @@ class AdminHandler(BaseHTTPRequestHandler):
         """
         self.send_html(self.layout("Filter", content))
 
+    def send_mitm(self):
+        mitm_domains = read_mitm_domains()
+
+        content = f"""
+        <section>
+            <h2>HTTPS MITM Domains</h2>
+            <p class="muted">Only these domains are decrypted. All other HTTPS traffic uses normal CONNECT tunneling.</p>
+            {self.add_form("add_mitm_domain", "Add MITM domain", "example.com")}
+            {self.entry_list(mitm_domains, "remove_mitm_domain", "No MITM domains")}
+        </section>
+        """
+        self.send_html(self.layout("MITM", content))
+
     def stat_card(self, label, value):
         return f"""
         <div class="stat">
@@ -277,7 +338,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         </div>
         """
 
-    def details_section(self, details):
+    def request_details_section(self, details, current_index, total_details):
         if not details:
             return """
             <section>
@@ -286,14 +347,36 @@ class AdminHandler(BaseHTTPRequestHandler):
             </section>
             """
 
+        return f"""
+        <section>
+            <h2>Request Details</h2>
+            {self.request_arrow_controls(current_index, total_details)}
+            {self.details_card(details)}
+        </section>
+        """
+
+    def request_arrow_controls(self, current_index, total_details):
+        newer_index = max(0, current_index - 1)
+        older_index = min(total_details - 1, current_index + 1)
+        newer_class = " disabled" if current_index == 0 else ""
+        older_class = " disabled" if current_index >= total_details - 1 else ""
+
+        return f"""
+        <div class="request-nav">
+            <a class="arrow-button{newer_class}" href="/?request={newer_index}">&larr; Newer</a>
+            <span class="request-position">Request {current_index + 1} of {total_details}</span>
+            <a class="arrow-button{older_class}" href="/?request={older_index}">Older &rarr;</a>
+        </div>
+        """
+
+    def details_card(self, details):
         headers = "\n".join(
             f"{key}: {value}" for key, value in details.get("headers", {}).items()
         )
         parsed_request = html.escape(str(details.get("parsed_request", {})))
 
         return f"""
-        <section>
-            <h2>Latest Request Details</h2>
+        <div class="detail-card">
             <div class="stats">
                 {self.stat_card("Protocol", details.get("protocol", ""))}
                 {self.stat_card("Method", details.get("method", ""))}
@@ -311,8 +394,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             <h3>Response Headers</h3>
             <pre>{html.escape(details.get("response_headers", "") or "No response headers")}</pre>
             <h3>Body Preview</h3>
-            <pre>{html.escape(details.get("body_preview", "") or "No body preview")}</pre>
-        </section>
+            <pre>{html.escape(clean_body_preview_for_display(details))}</pre>
+        </div>
         """
 
     def format_logs(self, lines):
@@ -414,6 +497,64 @@ class AdminHandler(BaseHTTPRequestHandler):
             color: white;
             text-decoration: none;
             font-weight: 600;
+        }}
+
+        .button-link.active {{
+            background: var(--accent);
+        }}
+
+        .detail-controls {{
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 14px;
+        }}
+
+        .request-nav {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 16px;
+            padding: 10px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: #f8fafc;
+        }}
+
+        .arrow-button {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 110px;
+            padding: 9px 12px;
+            border-radius: 6px;
+            background: var(--accent);
+            color: white;
+            text-decoration: none;
+            font-weight: 650;
+        }}
+
+        .arrow-button.disabled {{
+            pointer-events: none;
+            opacity: 0.45;
+            background: #667085;
+        }}
+
+        .request-position {{
+            color: var(--muted);
+            font-weight: 650;
+        }}
+
+        .detail-card {{
+            border-top: 1px solid var(--line);
+            padding-top: 18px;
+            margin-top: 18px;
+        }}
+
+        .detail-card:first-of-type {{
+            border-top: 0;
+            padding-top: 0;
         }}
 
         main {{
@@ -567,6 +708,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             <a href="/logs">Logs</a>
             <a href="/cache">Cache</a>
             <a href="/filter">Filter</a>
+            <a href="/mitm">MITM</a>
         </nav>
     </header>
     <main>{content}</main>

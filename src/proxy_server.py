@@ -1,12 +1,15 @@
 import select
 import socket
+import ssl
 import threading
 
 from cache_manager import get_cached_response, save_response_to_cache
-from config import HOST, PORT
+from cert_manager import ensure_ca_certificate, ensure_host_certificate
+from config import ENABLE_MITM, HOST, PORT
 from filter_manager import is_host_allowed
-from forwarder import forward_request
+from forwarder import forward_https_request, forward_request
 from logger_setup import setup_logger
+from mitm_manager import is_mitm_host, read_mitm_domains
 from request_parser import parse_request
 from tracking_manager import save_tracked_details
 
@@ -31,6 +34,8 @@ class ProxyServer:
         self.running = True
 
         print("Proxy server is listening...")
+        print(f"MITM enabled: {ENABLE_MITM}")
+        print(f"MITM domains: {read_mitm_domains()}")
 
         try:
             while self.running:
@@ -104,6 +109,12 @@ class ProxyServer:
             pass
 
         return "unknown"
+
+    def should_mitm_host(self, host):
+        if not ENABLE_MITM:
+            return False
+
+        return is_mitm_host(host)
 
     def print_request_summary(self, client_address, parsed, request_data, status_code, cache_result):
         raw_request = request_data.decode(errors="replace").strip()
@@ -197,6 +208,97 @@ class ProxyServer:
             except OSError:
                 pass
 
+    def handle_connect_mitm(self, client_socket, client_address, parsed, connect_request_data):
+        host = parsed["host"]
+        port = parsed["port"]
+
+        try:
+            ensure_ca_certificate()
+            cert_path, key_path = ensure_host_certificate(host)
+
+            if not self.safe_send(client_socket, b"HTTP/1.1 200 Connection Established\r\n\r\n"):
+                return
+
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            secure_client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
+
+            request_data = self.receive_request(secure_client_socket)
+
+            if not request_data:
+                return
+
+            inner_parsed = parse_request(request_data)
+
+            if not inner_parsed:
+                self.safe_send(
+                    secure_client_socket,
+                    b"HTTP/1.1 400 Bad Request\r\n"
+                    b"Connection: close\r\n"
+                    b"Content-Length: 11\r\n\r\n"
+                    b"Bad Request"
+                )
+                return
+
+            if not inner_parsed["host"]:
+                inner_parsed["host"] = host
+
+            inner_parsed["port"] = port
+
+            cache_result = "NONE"
+
+            if inner_parsed["method"] == "GET":
+                cached_response = get_cached_response(inner_parsed["host"], inner_parsed["path"])
+
+                if cached_response:
+                    cache_result = "HIT"
+                    status_code = self.get_status_code(cached_response)
+                    self.log_request(client_address, inner_parsed, status_code, cache_result)
+                    save_tracked_details("HTTPS MITM", client_address, inner_parsed, request_data, cached_response)
+                    self.print_request_summary(client_address, inner_parsed, request_data, status_code, cache_result)
+                    self.safe_send(secure_client_socket, cached_response)
+                    return
+
+                cache_result = "MISS"
+
+            response_data = forward_https_request(inner_parsed["host"], inner_parsed["port"], request_data)
+            status_code = self.get_status_code(response_data)
+
+            if inner_parsed["method"] == "GET" and status_code == "200":
+                save_response_to_cache(inner_parsed["host"], inner_parsed["path"], response_data)
+
+            if status_code in ("502", "504"):
+                self.logger.error(
+                    f"ERROR client={client_address[0]}:{client_address[1]} "
+                    f"target={inner_parsed['host']}:{inner_parsed['port']} method={inner_parsed['method']} "
+                    f"url={inner_parsed['path']} status={status_code}"
+                )
+
+            self.log_request(client_address, inner_parsed, status_code, cache_result)
+            save_tracked_details("HTTPS MITM", client_address, inner_parsed, request_data, response_data)
+            self.print_request_summary(client_address, inner_parsed, request_data, status_code, cache_result)
+            self.safe_send(secure_client_socket, response_data)
+
+        except ssl.SSLError as error:
+            self.logger.error(
+                f"ERROR client={client_address[0]}:{client_address[1]} "
+                f"target={host}:{port} method=CONNECT url={parsed['path']} tls_error={error}"
+            )
+            self.print_request_summary(client_address, parsed, connect_request_data, "TLS_ERROR", "NONE")
+        except Exception as error:
+            self.logger.error(
+                f"ERROR client={client_address[0]}:{client_address[1]} "
+                f"target={host}:{port} method=CONNECT url={parsed['path']} mitm_error={error}"
+            )
+            self.print_request_summary(client_address, parsed, connect_request_data, "500", "NONE")
+            self.safe_send(
+                client_socket,
+                b"HTTP/1.1 500 Internal Server Error\r\n"
+                b"Connection: close\r\n"
+                b"Content-Length: 29\r\n\r\n"
+                b"Certificate generation failed"
+            )
+
     def handle_http_request(self, client_socket, client_address, parsed, request_data):
         cache_result = "NONE"
 
@@ -217,7 +319,7 @@ class ProxyServer:
         response_data = forward_request(parsed["host"], parsed["port"], request_data)
         status_code = self.get_status_code(response_data)
 
-        if parsed["method"] == "GET" and status_code not in ("502", "504", "unknown"):
+        if parsed["method"] == "GET" and status_code == "200":
             save_response_to_cache(parsed["host"], parsed["path"], response_data)
 
         if status_code in ("502", "504"):
@@ -263,7 +365,14 @@ class ProxyServer:
                 return
 
             if parsed["method"] == "CONNECT":
-                self.handle_connect_tunnel(client_socket, client_address, parsed, request_data)
+                if self.should_mitm_host(parsed["host"]):
+                    with self.print_lock:
+                        print(f"Using HTTPS MITM for {parsed['host']}:{parsed['port']}")
+                    self.handle_connect_mitm(client_socket, client_address, parsed, request_data)
+                else:
+                    with self.print_lock:
+                        print(f"Using HTTPS tunnel for {parsed['host']}:{parsed['port']}")
+                    self.handle_connect_tunnel(client_socket, client_address, parsed, request_data)
             else:
                 self.handle_http_request(client_socket, client_address, parsed, request_data)
         finally:

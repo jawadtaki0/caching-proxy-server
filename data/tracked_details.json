@@ -1,29 +1,27 @@
 {
-  "timestamp": "2026-04-26 22:49:30",
+  "timestamp": "2026-04-27 22:20:24",
   "protocol": "HTTPS CONNECT",
-  "client": "127.0.0.1:49161",
+  "client": "127.0.0.1:50443",
   "method": "CONNECT",
-  "path": "beacons.gcp.gvt2.com:443",
-  "host": "beacons.gcp.gvt2.com",
+  "path": "web.whatsapp.com:443",
+  "host": "web.whatsapp.com",
   "port": 443,
   "headers": {
-    "host": "beacons.gcp.gvt2.com:443",
-    "proxy-connection": "keep-alive",
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    "host": "web.whatsapp.com:443",
+    "user-agent": "WhatsApp/2.2613.101 WINDOWS/10.0.26100.8246 Device/LENOVO-20N8000JAD-H"
   },
   "parsed_request": {
     "method": "CONNECT",
-    "path": "beacons.gcp.gvt2.com:443",
+    "path": "web.whatsapp.com:443",
     "http_version": "HTTP/1.1",
-    "host": "beacons.gcp.gvt2.com",
+    "host": "web.whatsapp.com",
     "port": 443,
     "headers": {
-      "host": "beacons.gcp.gvt2.com:443",
-      "proxy-connection": "keep-alive",
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+      "host": "web.whatsapp.com:443",
+      "user-agent": "WhatsApp/2.2613.101 WINDOWS/10.0.26100.8246 Device/LENOVO-20N8000JAD-H"
     }
   },
-  "raw_request": "CONNECT beacons.gcp.gvt2.com:443 HTTP/1.1\r\nHost: beacons.gcp.gvt2.com:443\r\nProxy-Connection: keep-alive\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36\r\n\r\n",
+  "raw_request": "CONNECT web.whatsapp.com:443 HTTP/1.1\r\nHost: web.whatsapp.com:443\r\nUser-Agent: WhatsApp/2.2613.101 WINDOWS/10.0.26100.8246 Device/LENOVO-20N8000JAD-H\r\n\r\n",
   "response_headers": "HTTP/1.1 200 Connection Established",
   "body_preview": ""
 }

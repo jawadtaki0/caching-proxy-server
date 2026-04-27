@@ -3,36 +3,7 @@ import ssl
 
 
 def forward_request(host, port, request_data):
-    request_text = request_data.decode(errors="replace")
-    lines = request_text.split("\r\n")
-
-    if lines:
-        request_line_parts = lines[0].split()
-
-        if len(request_line_parts) == 3:
-            method = request_line_parts[0]
-            path = request_line_parts[1]
-            version = request_line_parts[2]
-
-            if path.startswith("http://"):
-                path_without_http = path[7:]
-                first_slash_index = path_without_http.find("/")
-
-                if first_slash_index != -1:
-                    path = path_without_http[first_slash_index:]
-                else:
-                    path = "/"
-
-            lines[0] = f"{method} {path} {version}"
-
-    for i in range(1, len(lines)):
-        if lines[i].lower().startswith("connection:"):
-            lines[i] = "Connection: close"
-
-        if lines[i].lower().startswith("proxy-connection:"):
-            lines[i] = "Proxy-Connection: close"
-
-    new_request_data = "\r\n".join(lines).encode()
+    new_request_data = prepare_request_for_origin(request_data, normalize_absolute_uri=True)
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.settimeout(5)
@@ -86,6 +57,50 @@ def forward_request(host, port, request_data):
         server_socket.close()
 
 
+def prepare_request_for_origin(request_data, normalize_absolute_uri=False):
+    request_text = request_data.decode(errors="replace")
+    lines = request_text.split("\r\n")
+    method = ""
+
+    if lines:
+        request_line_parts = lines[0].split()
+
+        if len(request_line_parts) == 3:
+            method = request_line_parts[0]
+            path = request_line_parts[1]
+            version = request_line_parts[2]
+
+            if normalize_absolute_uri and path.startswith("http://"):
+                path_without_http = path[7:]
+                first_slash_index = path_without_http.find("/")
+
+                if first_slash_index != -1:
+                    path = path_without_http[first_slash_index:]
+                else:
+                    path = "/"
+
+            lines[0] = f"{method} {path} {version}"
+
+    filtered_lines = lines[:1]
+
+    for i in range(1, len(lines)):
+        header_name = lines[i].split(":", 1)[0].strip().lower()
+
+        if method == "GET" and header_name in ("if-modified-since", "if-none-match"):
+            continue
+
+        if header_name == "connection":
+            filtered_lines.append("Connection: close")
+            continue
+
+        if header_name == "proxy-connection":
+            continue
+
+        filtered_lines.append(lines[i])
+
+    return "\r\n".join(filtered_lines).encode()
+
+
 def forward_https_request(host, port, request_data):
     raw_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     raw_server_socket.settimeout(5)
@@ -95,7 +110,8 @@ def forward_https_request(host, port, request_data):
         raw_server_socket.connect((host, port))
 
         with ssl_context.wrap_socket(raw_server_socket, server_hostname=host) as server_socket:
-            server_socket.sendall(request_data)
+            new_request_data = prepare_request_for_origin(request_data)
+            server_socket.sendall(new_request_data)
 
             response_chunks = []
 

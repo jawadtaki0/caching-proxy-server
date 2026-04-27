@@ -8,5 +8,7 @@ certs/*
 admin_test_*.txt
 mitm_*.txt
 vendor/
+vendor_new/
 .venv/
 venv/
+data/request_history.json
